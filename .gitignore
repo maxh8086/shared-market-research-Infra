@@ -1,0 +1,6 @@
+# Secrets and everything that lives on disk: never committed.
+.env
+secrets/
+data/
+models/*
+!models/.gitkeep

@@ -1,0 +1,9 @@
+{
+  "note": "Every model weight the shared services and the projects need. models.ps1 downloads whatever is missing into models/huggingface (Hugging Face cache layout).",
+  "models": [
+    {"repo": "Qwen/Qwen3-4B-Instruct-2507", "size_gb": 8.0, "served_by": "vllm",
+     "used_by": ["ath_scanner: filing extraction and per-stock conclusions"]},
+    {"repo": "google/timesfm-2.5-200m-pytorch", "size_gb": 0.9, "served_by": "mounted read-only into the project's own job",
+     "used_by": ["ath_scanner: TimesFM price forecasts"]}
+  ]
+}

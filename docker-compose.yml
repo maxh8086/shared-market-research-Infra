@@ -1,0 +1,118 @@
+# Shared infrastructure for the market-research projects: SQL, NoSQL, graph and the LLM server.
+# Every project keeps its own analytical code and UI in its own compose file and joins the
+# `market-infra` network declared here, so one set of databases and one copy of the model
+# weights serve them all.
+#
+#   postgres  SQL             (Postgres 16 + pgvector)       -> postgres:5432
+#   mongo     NoSQL documents (MongoDB 7)                    -> mongo:27017
+#   neo4j     graph           (Neo4j 5 community)            -> neo4j:7687 (bolt), 7474 (browser)
+#   vllm      LLM server      (profile `llm`, needs the GPU) -> vllm:8000 (OpenAI-style API)
+#
+# Everything is stored in plain folders on this machine (no Docker volumes):
+#   data/postgres  data/mongo  data/neo4j/{data,logs}   the databases
+#   models/huggingface                                    the model weights (models.ps1 fills it)
+# Ports are published on 127.0.0.1 only. Passwords come from .env / secrets/, written by up.ps1.
+#
+# From a project's compose file:
+#   networks: {default: {name: market-infra, external: true}}
+name: market-infra
+
+networks:
+  default:
+    name: market-infra
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: mri-postgres
+    environment:
+      POSTGRES_USER: ${POSTGRES_ADMIN_USER:-mri_admin}
+      POSTGRES_PASSWORD: ${POSTGRES_ADMIN_PASSWORD:?run up.ps1 first, it generates .env}
+      POSTGRES_DB: postgres
+      TZ: Asia/Kolkata
+    volumes:
+      - ${DATA_DIR:-./data}/postgres:/var/lib/postgresql/data
+    ports:
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+    restart: "no"
+
+  mongo:
+    image: mongo:7
+    container_name: mri-mongo
+    command: ["--wiredTigerCacheSizeGB", "0.5", "--bind_ip_all"]
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: ${MONGO_ADMIN_USER:-mri_admin}
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_ADMIN_PASSWORD:?run up.ps1 first, it generates .env}
+    volumes:
+      - ${DATA_DIR:-./data}/mongo:/data/db
+    ports:
+      - "127.0.0.1:${MONGO_PORT:-27017}:27017"
+    healthcheck:
+      test: ["CMD-SHELL", "mongosh --quiet -u $${MONGO_INITDB_ROOT_USERNAME} -p $${MONGO_INITDB_ROOT_PASSWORD} --authenticationDatabase admin --eval 'db.adminCommand({ping:1}).ok' | grep -q 1"]
+      interval: 10s
+      timeout: 10s
+      retries: 30
+      start_period: 15s
+    restart: "no"
+
+  neo4j:
+    image: neo4j:5-community
+    container_name: mri-neo4j
+    environment:
+      NEO4J_AUTH: neo4j/${NEO4J_PASSWORD:?run up.ps1 first, it generates .env}
+      NEO4J_server_memory_heap_initial__size: 512m
+      NEO4J_server_memory_heap_max__size: 1g
+      NEO4J_server_memory_pagecache_size: 512m
+    volumes:
+      - ${DATA_DIR:-./data}/neo4j/data:/data
+      - ${DATA_DIR:-./data}/neo4j/logs:/logs
+    ports:
+      - "127.0.0.1:${NEO4J_HTTP_PORT:-7474}:7474"
+      - "127.0.0.1:${NEO4J_BOLT_PORT:-7687}:7687"
+    healthcheck:
+      test: ["CMD-SHELL", "cypher-shell -u neo4j -p \"$${NEO4J_AUTH#*/}\" 'RETURN 1' || exit 1"]
+      interval: 10s
+      timeout: 10s
+      retries: 30
+      start_period: 20s
+    restart: "no"
+
+  vllm:                  # profile `llm`: holds the GPU while it runs
+    build:
+      context: ./vllm
+      args:
+        VLLM_IMAGE: ${VLLM_IMAGE:-vllm/vllm-openai:v0.30.0}
+    image: market-infra-vllm
+    container_name: mri-vllm
+    environment:
+      HF_HUB_OFFLINE: "1"                # weights come only from models/huggingface (models.ps1 fills it)
+    volumes:
+      - ${MODELS_DIR:-./models}/huggingface:/root/.cache/huggingface
+    ports:
+      - "127.0.0.1:${VLLM_PORT:-8001}:8000"
+    ipc: host
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - {driver: nvidia, count: 1, capabilities: [gpu]}
+    profiles: ["llm"]
+    restart: "no"
+
+  model-fetch:           # profile `models`: one-shot download of everything in models.json
+    image: python:3.13-slim
+    container_name: mri-model-fetch
+    command: ["sh", "-c", "pip install -q --no-cache-dir huggingface_hub && python /fetch.py"]
+    environment:
+      HF_HOME: /models/huggingface
+    volumes:
+      - ${MODELS_DIR:-./models}/huggingface:/models/huggingface
+      - ./models.json:/models.json:ro
+      - ./models-tools/fetch.py:/fetch.py:ro
+    profiles: ["models"]
+    restart: "no"
